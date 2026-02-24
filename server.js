@@ -2,18 +2,15 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
+const multer = require("multer");
 
 const app = express();
-
-// katta audio base64 uchun limit
-app.use(express.json({ limit: "30mb" }));
+const upload = multer({ dest: "/tmp/uploads" });
 
 const PORT = process.env.PORT || 3000;
 
-// health check
 app.get("/", (_req, res) => res.send("ok"));
 
-// xavfsiz filename
 function safeName(s) {
   return (s || "short")
     .toString()
@@ -21,49 +18,53 @@ function safeName(s) {
     .slice(0, 60);
 }
 
-app.post("/render", async (req, res) => {
+// multipart/form-data endpoint
+// fields: title, script, source_url, audio(file)
+app.post("/render", upload.single("audio"), async (req, res) => {
   try {
-    const { title, script, audio_b64 } = req.body || {};
+    const title = req.body?.title || "Steam Update";
+    const script = req.body?.script || "";
+    const source_url = req.body?.source_url || "";
 
-    if (!audio_b64) {
-      return res.status(400).json({ error: "audio_b64 is required" });
+    if (!req.file?.path) {
+      return res.status(400).json({ error: "audio file is required (field name: audio)" });
     }
 
-    const jobId = Date.now().toString();
+    const jobId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const workDir = path.join("/tmp", jobId);
     fs.mkdirSync(workDir, { recursive: true });
 
-    // 🎧 audio yozamiz
     const audioPath = path.join(workDir, "voice.mp3");
-    fs.writeFileSync(audioPath, Buffer.from(audio_b64, "base64"));
+    fs.copyFileSync(req.file.path, audioPath);
 
-    // 🎬 background
     const bgPath = path.join(__dirname, "assets", "background.mp4");
     if (!fs.existsSync(bgPath)) {
-      return res.status(500).json({
-        error: "assets/background.mp4 not found"
-      });
+      return res.status(500).json({ error: "assets/background.mp4 not found" });
     }
 
-    // 📤 output
     const outName = `${safeName(title)}_${jobId}.mp4`;
     const outPath = path.join(workDir, outName);
 
-    // 🔥 FFmpeg (MVP)
-    const cmd = `
-      ffmpeg -y -hide_banner -loglevel error \
-      -stream_loop -1 -i "${bgPath}" \
-      -i "${audioPath}" \
-      -shortest \
-      -c:v libx264 -preset veryfast -pix_fmt yuv420p \
-      -c:a aac -b:a 192k \
-      -movflags +faststart \
-      "${outPath}"
-    `;
+    const cmd = [
+      "ffmpeg",
+      "-y",
+      "-hide_banner",
+      "-loglevel", "error",
+      "-stream_loop", "-1",
+      "-i", `"${bgPath}"`,
+      "-i", `"${audioPath}"`,
+      "-shortest",
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-b:a", "192k",
+      "-movflags", "+faststart",
+      `"${outPath}"`
+    ].join(" ");
 
     execSync(cmd, { stdio: "inherit" });
 
-    // public papka
     const publicDir = path.join(__dirname, "public", jobId);
     fs.mkdirSync(publicDir, { recursive: true });
 
@@ -73,20 +74,13 @@ app.post("/render", async (req, res) => {
     const baseUrl = `${req.protocol}://${req.get("host")}`;
     const video_url = `${baseUrl}/files/${jobId}/${encodeURIComponent(outName)}`;
 
-    return res.json({
-      ok: true,
-      video_url
-    });
-
+    return res.json({ ok: true, video_url, title, source_url });
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message || "render failed" });
   }
 });
 
-// public serve
 app.use("/files", express.static(path.join(__dirname, "public")));
 
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
-});
+app.listen(PORT, () => console.log("Server running on", PORT));
